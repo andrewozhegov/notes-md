@@ -1,6 +1,6 @@
 # Game of Pods
 
-### 1. Drupal
+### 1. Bravo. Drupal
 
 ##### Install Drupal using Docker
 
@@ -265,6 +265,181 @@ spec:
     nodePort: 30095 # specify nodePort
   selector:
     app: drupal
+  type: NodePort
+status:
+  loadBalancer: {}
+```
+
+
+### 2. Pento. Troubleshooting and FileServer deploying
+
+##### Docker approach
+
+```sh
+# run fileserver container
+docker run -d
+    --name fileserver \
+    -v /web:/web \
+    -p 8080:8080 \
+    kodekloud/fileserver
+
+# visit http://localhost:8080 and see contents of '/web' directory
+```
+
+##### Kubernetes approach
+
+1.  **master** node troubleshooting
+
+```sh
+$ kubectl get pods
+Unable to connect to the server: x509: certificate signed by unknown authority
+
+$ ps aux | grep kube-apiserver
+... kube-apiserver --advertise-address=172.17.0.45 --secure-port=6443 ...
+# check ~/.kube/config and fix ip:port of the cluster
+```
+
+```sh
+# check etcd and apiserver logs
+$ docker logs k8s_etcd_etcd-master_kube-system_70002ede83541cb00eb7e83dd778d943_0
+2020-03-31 17:05:34.440785 I | embed: rejected connection from "172.17.0.17:56792" (error "remote error: tls: bad certificate", ServerName "")
+
+$ docker logs k8s_kube-apiserver_kube-apiserver-master_kube-system_8b923cfadd326ccd8bd3b3404158635e_10
+Error: unable to load client CA file: unable to load client CA file: open /etc/kubernetes/pki/ca-authority.crt: no such file or directory
+
+# check kube-apiserver manifest
+$ vim /etc/kubernetes/manifests/
+# change '--client-ca-file=' to /etc/kubernetes/pki/ca.crt
+```
+
+```sh
+# check for all pods are Running
+$ kubectl get pods --all-namespaces
+NAMESPACE    NAME                          READY  STATUS            RESTARTS  AGE
+kube-system  pod/coredns-855c87754f-6jbrv  0/1    ImagePullBackOff  0         21m
+kube-system  pod/coredns-855c87754f-m9ksd  0/1    ImagePullBackOff  0         21m
+...
+
+$ kubectl describe --namespace=kube-system pods coredns-855c87754f-6jbrv
+... manifest for k8s.gcr.io/kubedns:1.3.1 not found
+
+# change image to 'k8s.gcr.io/coredns:1.3.1'
+$ kubectl edit deployments.apps coredns --namespace=kube-system
+```
+
+2.  worker **node01** troubleshooting
+
+```sh
+# beacouse katacoda-cloud-provider doesn't tolerate with master and might be deployed only on worker node
+$ kubectl get deployments.apps --all-namespaces
+NAMESPACE   NAME                                     READY  UP-TO-DATE  AVAILABLE  AGE
+kube-system deployment.apps/katacoda-cloud-provider  0/1    1           0          64m
+
+# worker node is cordoned
+$ kubectl get node
+NAME     STATUS                     ROLES    AGE   VERSION
+master   Ready                      master   69m   v1.14.0
+node01   Ready,SchedulingDisabled   <none>   69m   v1.14.0
+
+# let's enable Sheduling on node01
+$ kubectl uncordon node01
+```
+
+3.  Create `/web` directory on worker node
+
+```sh
+ssh node01
+mkdir /web
+```
+
+4.  Create **PersistentVolume** for `/web`
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: data-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: "/web"
+EOF
+```
+
+5.  Create **PersistentVolumeClaim** for `data-pv`
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+```
+
+6.  Create fileserver **Pod**
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gop-fileserver
+  labels:
+    app: fileserver
+spec:
+  volumes:
+  - name: data-store
+    persistentVolumeClaim:
+      claimName: data-pvc
+  containers:
+  - image: kodekloud/fileserver
+    name: fileserver
+    volumeMounts:
+    - mountPath: "/web"
+      subPath: web
+      name: data-store
+EOF
+```
+
+7.  Expose pod with **NodePort**
+
+```sh
+kubectl expose pod gop-fileserver \
+    --name=gop-fs-service \
+    --type=NodePort \
+    --port=8080 \
+    --selector='app=fileserver' \
+    --dry-run -oyaml > fileserver-svc.yaml
+vim fileserver-svc.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    app: fileserver
+  name: gop-fs-service
+spec:
+  ports:
+  - port: 8080
+    protocol: TCP
+    targetPort: 8080
+    nodePort: 31200 # specify nodeport
+  selector:
+    app: fileserver
   type: NodePort
 status:
   loadBalancer: {}
