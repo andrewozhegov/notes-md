@@ -612,3 +612,176 @@ spec:
 EOF
 ```
 
+### 4. Tyro. Jekyll SSG
+
+*static site generator*
+
+##### Docker
+
+```sh
+# reate directory for site
+mkdir /site
+
+# run site creation and put it in created dir
+docker run -d \
+    --name jekyll \
+    -v /site:/site \
+    kodekloud/jekyll new /site
+
+# run created site
+docker run -d \
+    -p 8080:4000 \
+    -v /site:/site \
+    kodekloud/jekyll-serve
+
+# now you can access the application on http://localhost:8080
+```
+
+##### Kubernetes
+
+1.  `hostPath` dir ona worker node already created
+2.  **PersistentVolume** for `hostPath` alredy created
+3.  Create **PersistentVolumeClaim**
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jekyll-site
+  namespace: development
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+```
+
+4.  Add `drogo` user to kubeconfig
+
+```yaml
+...
+# add context
+contexts:
+- context:
+    cluster: kubernetes
+    user: drogo
+  name: developer
+...
+# add user & specify crts
+users:
+- name: drogo
+  user:
+    client-certificate: /root/drogo.crt
+    client-key: /root/drogo.key
+...
+```
+
+5.  Add **Role** for `drogo`
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: development
+  name: developer-role
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["services", "pods", "persistentvolumeclaims"]
+  verbs: ["*"]
+EOF
+```
+
+5.  Create **RoleBinding** for user `drogo` and `developer-role`
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-rolebinding
+  namespace: development
+subjects:
+- kind: User
+  name: drogo
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: developer-role
+  apiGroup: rbac.authorization.k8s.io
+EOF
+```
+
+6.  Use `developer` context as a default
+
+```sh
+kubectl config use-context developer
+```
+
+7.  Deply `jekyll` as a **Pod**
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jekyll
+  namespace: development
+  labels:
+    run: jekyll
+spec:
+  initContainers:
+  - name: copy-jekyll-site
+    image: kodekloud/jekyll
+    command: [ "jekyll", "new", "/site" ]
+    volumeMounts:
+      - mountPath: "/site"
+        name: site
+  volumes:
+    - name: site
+      persistentVolumeClaim:
+        claimName: jekyll-site
+  containers:
+  - name: jekyll
+    image: kodekloud/jekyll-serve
+    volumeMounts:
+      - mountPath: "/site"
+        name: site
+EOF
+```
+
+7. Expose pod `jekyll` as a **NodePort**
+
+```sh
+kubectl expose pod jekyll \
+    --namespace=development \
+    --name jekyll-node-service \
+    --port=8080 \
+    --target-port=4000 \
+    --dry-run -oyaml > jekyll-svc.yaml
+vim jekyll-svc.yaml
+```
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: jekyll
+  namespace: development
+spec:
+  type: NodePort
+  ports:
+  - port: 8080
+    protocol: TCP
+    targetPort: 4000
+    nodePort: 30097 # add nodeport
+  selector:
+    run: jekyll
+    namespace: development
+EOF
+```
+
