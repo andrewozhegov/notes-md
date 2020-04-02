@@ -105,7 +105,7 @@ EOF
 4.  Deploy **Drupal** itself
 
 ```yaml
-cat <<EOF | kubectl create -f - --dry-run
+cat <<EOF | kubectl create -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -270,7 +270,6 @@ status:
   loadBalancer: {}
 ```
 
-
 ### 2. Pento. Troubleshooting and FileServer deploying
 
 ##### Docker approach
@@ -297,6 +296,7 @@ Unable to connect to the server: x509: certificate signed by unknown authority
 $ ps aux | grep kube-apiserver
 ... kube-apiserver --advertise-address=172.17.0.45 --secure-port=6443 ...
 # check ~/.kube/config and fix ip:port of the cluster
+# 6443 is a standart port for kube-apiserver
 ```
 
 ```sh
@@ -443,5 +443,183 @@ spec:
   type: NodePort
 status:
   loadBalancer: {}
+```
+
+### 3. Redis Cluster
+
+##### Docker
+
+```sh
+mkdir redis-cluster
+vim redis-cluster/cluster-config.conf
+```
+
+```
+port 6379
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 5000
+appendonly yes
+```
+
+```sh
+cd redis-cluster
+
+# run 6 equal redis containers
+for j in `seq 1 6`; do docker run -d -v \
+    $PWD/cluster-config.conf:/usr/local/etc/redis/redis.conf \
+    --name redis-$j \
+    redis redis-server /usr/local/etc/redis/redis.conf; \
+done
+
+# get IP of all redis containers
+ip_list=$(`for j in `seq 2 6`; do docker inspect -f '{{ (index .NetworkSettings.Networks "bridge").IPAddress }}' redis-$j; done`)
+
+# create cluster combining all instances ips
+docker exec -it redis-1 redis-cli --cluster create --cluster-replicas 1 $ip_list
+
+# check cluster status from any instance
+docker exec -it redis-1 redis-cli cluster info
+```
+
+##### Kubernetes
+
+1.  Explore already existing **ConfigMap**
+
+```yaml
+$ kubectl get configmaps redis-cluster-configmap -oyaml
+apiVersion: v1
+data:
+  redis.conf: |-
+    cluster-enabled yes
+    cluster-require-full-coverage no
+    cluster-node-timeout 15000
+    cluster-config-file /data/nodes.conf
+    cluster-migration-barrier 1
+    appendonly yes
+    protected-mode no
+  update-node.sh: |
+    #!/bin/sh
+    REDIS_NODES="/data/nodes.conf"
+    sed -i -e "/myself/ s/[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/${POD_IP}/" ${REDIS_NODES}
+    exec "$@"
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2020-04-01T18:01:53Z"
+  name: redis-cluster-configmap
+  namespace: default
+  resourceVersion: "7623"
+  selfLink: /api/v1/namespaces/default/configmaps/redis-cluster-configmap
+  uid: de9f9317-7442-11ea-98bc-0242ac11001f
+```
+
+2.  Create `hostPath` directories  on the worker node for each redis instance
+
+```sh
+ssh node01
+for n in `seq 0 6`; do mkdir /redis0$n; done
+```
+
+3.  Create **PersistentVolume** for each of the `hostPath` directories
+
+```yaml
+for n in `seq 1 6`; do
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: redis0$n
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/redis0$n"
+EOF
+done
+```
+
+3.  Deploy 6 redis instances as a **StatefulSet**
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-cluster
+spec:
+  selector:
+    matchLabels:
+      app: redis-cluster
+  serviceName: "redis-cluster-service"
+  replicas: 6
+  template:
+    metadata:
+      labels:
+        app: redis-cluster
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: redis
+        image: redis:5.0.1-alpine
+        command: ["/conf/update-node.sh", "redis-server", "/conf/redis.conf"]
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        ports:
+        - containerPort: 6379
+          name: client
+        - containerPort: 16379
+          name: gossip
+        volumeMounts:
+        - name: conf
+          mountPath: /conf
+          readOnly: false
+        - name: data
+          mountPath: /data
+          readOnly: false
+      volumes:
+      - name: conf
+        configMap:
+          name: redis-cluster-configmap
+          defaultMode: 0755
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+EOF
+```
+
+4.  Create cluster by combining all instances IPs
+
+```bash
+kubectl exec -it redis-cluster-0 -- redis-cli --cluster create --cluster-replicas $(kubectl get pods -l app=redis-cluster -o jsonpath='{range.items[*]}{.status.podIP}:6379 ')
+```
+
+5.  Expose StatefulSet as a **ClusterIP**
+
+```yaml
+cat <<EOF | kubectl create -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster-service
+spec:
+  ports:
+  - port: 6379
+    name: client
+  - port: 16379
+    name: gossip
+  clusterIP: None
+  selector:
+    app: redis-cluster
+EOF
 ```
 
