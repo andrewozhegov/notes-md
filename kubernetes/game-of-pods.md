@@ -152,17 +152,6 @@ spec:
           - mountPath: "/var/www/html/themes"
             subPath: themes
             name: drupal-pv
-EOFcat <<EOF | kubectl create -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: drupal-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
 EOF
 ```
 
