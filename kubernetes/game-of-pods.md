@@ -462,10 +462,18 @@ for j in `seq 1 6`; do docker run -d -v \
 done
 
 # get IP of all redis containers
-ip_list=$(`for j in `seq 2 6`; do docker inspect -f '{{ (index .NetworkSettings.Networks "bridge").IPAddress }}' redis-$j; done`)
+ip_list=`
+for j in `seq 2 6`; do
+    docker inspect \
+        -f '{{ (index .NetworkSettings.Networks "bridge").IPAddress }}' \
+        redis-$j; \
+done`
 
 # create cluster combining all instances ips
-docker exec -it redis-1 redis-cli --cluster create --cluster-replicas 1 $ip_list
+docker exec -it redis-1 redis-cli \
+    --cluster create \
+    --cluster-replicas 1 \
+    $ip_list
 
 # check cluster status from any instance
 docker exec -it redis-1 redis-cli cluster info
@@ -589,7 +597,11 @@ EOF
 4.  Create cluster by combining all instances IPs
 
 ```bash
-kubectl exec -it redis-cluster-0 -- redis-cli --cluster create --cluster-replicas $(kubectl get pods -l app=redis-cluster -o jsonpath='{range.items[*]}{.status.podIP}:6379 ')
+kubectl exec -it redis-cluster-0 -- redis-cli \
+    --cluster create \
+    --cluster-replicas $(kubectl get pods \
+        -l app=redis-cluster \
+        -o jsonpath='{range.items[*]}{.status.podIP}:6379')
 ```
 
 5.  Expose StatefulSet as a **ClusterIP**
