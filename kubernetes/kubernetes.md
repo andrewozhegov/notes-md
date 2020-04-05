@@ -107,3 +107,302 @@ $ kubectl exec etcd-master –n kube-system etcdctl get / --prefix –keys-only
 
 **Services** make pods reacheble inside and outside the cluster
 
+---
+
+### Scheduling
+
+#### Manual scheduling
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    ports:
+    - containerPort: 8080
+  nodeName: node02
+```
+
+*specify **nodeName** to place pod on a specific node without sheduler*
+
+##### How sheduling works
+
+1.  Scheduler looks for pod definitions **without nodeName** specified
+
+2.  Sheduler indetifies the right node to place pod on, using sheduling algoritms (paying attention to taints & tolerations, nodeAffinity, Resouce requirements & Limits).
+
+3.  Sheduler adds **nodeName** to a pod using **Binding** resource (you cant move already assigned pod to another node this way)
+
+```yaml
+apiVersion: v1
+kind: Binding
+metadata:
+  name: nginx
+target:
+  apiVersion: v1
+  kind: Node
+  name: node01
+```
+
+```bash
+curl --header "Content-Type:application/json" --request POST --data '{"apiVersion":"v1", "kind": "Binding“ …. }' http://$SERVER/api/v1/namespaces/default/pods/$PODNAME/binding/
+```
+
+#### Labels & Selectors
+
+*standart method of grouping resouces*
+
+##### Add label
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  creationTimestamp: null
+  labels:
+    run: bee
+    ...
+```
+
+##### Use selector
+
+```bash
+kubectl get pods --selector run=bee
+```
+
+*select pod by name in a service defenition*
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-service
+spec:
+  type: NodePort
+  ports:
+    - targetPort: 8080
+      port: 8080
+      nodePort: 30080
+  selector:
+    name: simple-webapp
+```
+
+*also **ReplicaSet** select pods as replicas by labels*
+
+#### Taints & Tolerations
+
+*defines what pods can be scheduled on a node*
+
+*if particular pod doesn't **tolerate** (haven't toleration) with **taint** on a node, it can't be placed on this node*
+
+##### Add Taint to node
+
+```bash
+# if pod NOT TOLERATE with node it will not be deployed on this node anyway
+# even if pod will wait for node in a Pending state
+kubectl taint nodes node01 spray=mortain:NoSchedule
+# NOT TOLERATE pod will not be placed on this node if any other candidate is available (system will try to avoid placing pod on this node)
+kubectl taint nodes node01 key=value:PreferNoSchedule
+# even already deployed NOT TOLERATE pods will be evicted
+kubectl taint nodes node01 key=value:NoExecute
+```
+
+##### Add toleration to pod
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+  tolerations:
+  - key: "spray"
+    operator: "Equal"
+    value: "mortein"
+    effect: "NoSchedule"
+```
+
+**Taints & Toleration will NOT guaratee that Tolerate Pod be plased only on Tainted NODE! (use NodeAffinity for this) Instead it tells the node to only accept pods with certain toleration.**
+
+#### Node Selectors
+
+1.  Add special **label** to node
+
+```bash
+kubectl label nodes node01 size=Large
+```
+
+2.  Use **nodeSelector** in
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+  nodeSelector:
+    size: Large
+```
+
+3.  Now `nginx` pod will be places on `node01`
+
+**For more complex conditions like "NOT Large" of "Large OR Medium" etc. use NodeAffinity**
+
+#### Node Affinity
+
+*one more way to control pod placemant on a specific node*
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: size
+            operator: In # NotIn, Exists, etc.
+            values:
+            - Large
+            - Medium
+```
+
+*'requiredDuringSchedulingIgnoredDuringExecution' will not schedule pod if there is no mathing node*
+*If NodeAffinity may not match any node better use 'preferredDuringSchedulingIgnoredDuringExecution', in that case if matching node will not fount, NodeAffinity will ignore this rule.*
+
+**Add Node Affinity to Deployment:**
+
+1. Label required node
+
+``kubectl label node node01 color=blue``
+
+2. Set Node Affinity to the deployment to place the PODs on node01 only
+
+add in pod's `spec` section:
+
+```yaml
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: color
+                operator: In
+                values:
+                - blue
+```
+
+**NodeAffinity does not guarantee that any other pods will not be placed on the particular node! (use Taints & Tolerations for that)**
+
+#### Resources requirements & Limits
+
+Node resources: CPU, RAM, disc space (0.5 cpu & 256Mi by default)
+
+Default limits: 1vCPU, 512Mi of RAM
+
+**Container can't use more CPU than it's limit! (will cause THROTTLE)**
+
+**Container can use more memory than limiited (but if it will use more memory constantly, pod will be TERMINATED)**
+
+*if there is no node which have required amount of resources, pod will stay in a Pending state*
+
+##### Specify pod resources requirements & Set a limit of resources usage
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+     resources:
+       requests:
+         memory: "1Gi"
+         cpu: 1
+       limits:
+         memory: "2Gi"
+         cpu: 2
+```
+
+#### DaemonSets
+
+*runs an instance of the pod on each node in the cluster*
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: replicaset-1
+spec:
+  selector:
+    matchLabels:
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        tier: frontend
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+```
+
+#### Static Pods
+
+**kubelet** can manage node independently (without apiserver) by creating **pods** from manifest files in a specific manifest folder (works only for pods).
+
+How to get manifest folder for static pods:
+`cat $(ps -aux | grep kubelet | grep -Po '(?<=\-\-config=)\S+') | grep staticPodPath | awk '{print $2}'` or look for a `staticPodPath` in the kubeconfig file (specified in a `--config` argument for kubelet).
+
+#### Multiple Schedulers
+
+*for specific applications witch requires some specific checks for choosing a node to be placed on*
+
+1.  Custom-sheduler should have a unique `--scheduler-name` specified as argument.
+2.  Set argument `--leader-elect=false` to get multiple schedulers working (if there is not a High Availability cluster setup).
+3.  For HA cluster with multiple masters set `--lock-object-name=sheduler-name` to differentiate the new custom scheduler from the default during the leader election process.
+4.  Deploy as pod
+5.  Specify custon scheduler for the pod:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+  schedulerName: my-scheduler # here it is
+```
+
+*if scheduler isn't working correct pod will continue in a **Pending** state*
+
+6.  Check what scheduler been used to pick a node for pod
+
+```bash
+kubectl get events
+kubectl logs --namespce=kube-system my-scheduler
+```
+
