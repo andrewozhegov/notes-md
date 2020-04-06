@@ -442,3 +442,256 @@ kubectl top node
 kubectl logs -f -namepod.container-name
 ```
 
+---
+
+### Lifecycle Management
+
+#### Rolling Update & Rollback
+
+##### Rollout and Versioning
+
+*when you first create a deployment it triggers a rollout a new rollout creates a new deployment revision*
+
+*when the container version is updated to a new one a new rollout is triggered and a new deployment revision is created*
+
+![image-20200404192550005](../.img/image-20200404192550005.png)
+
+```bash
+# get rollout status
+kubectl rollout status deployment/nginx
+
+# get rollout history
+kubectl rollout history deployment/nginx
+```
+
+##### Deplyment Strategy
+
+**Recreate** - destroy all replicas with old versions and then create all new ones (applications unavailable due upgrading).
+*scaling replicaset to 0, and then scale it back to required amount*
+
+**Rolling Update** - destroy old version pod and bring a new version one by one (default).
+*creates a new replicaset inside deployment. one step is scale old replica down and scale new replica up. and repeat for each pod in a replica.*
+
+##### Run version upgrage
+
+```bash
+# change manifest and apply it or set new image directly in deployment
+kubectl set image deployment/nginx-deployment <container-name>=nginx:1.9.1 --record
+```
+
+##### Rollback
+
+*undo upgrade. get old versions of pods back*
+
+```bash
+kubectl rollout undo deployment/nginx
+```
+
+#### Commands & Arguments
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+     command: # same as Dockerfiles entrypoint
+     - sleep
+     args:    # same as Dockerfiles ARGS
+     - 10
+```
+
+#### Environment variables
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+     env:
+     - name: HADCODE
+       value: val
+     - name: FROM_CONFIGMAP
+       valueFrom:
+         configMapKeyRef:
+           name: my-configmap
+           key: FROM_CONFIGMAP
+     - name: FROM_SECRET
+       valueFrom:
+         secretKeyRef:
+           name: my-secret
+           key: FROM_SECRET
+```
+
+#### ConfigMaps
+
+*used to store configuration data in the form of key value pairs in Kubernetes*
+
+##### Create ConfigMap
+
+```bash
+kubectl create configmap <config-name> \
+    --from-literal=<key>=<value>
+kubectl create configmap <config-name> \
+    --from-file=app-config.properties
+```
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: game-config
+data:
+  FROM_CONFIGMAP: value
+  SECOND_ENV: value2
+```
+
+##### Use ConfigMap in manifest file
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+     envFrom: 				# use all env variables from configmap
+     - configMapRef:
+       name: game-config
+     env:
+     - name: FROM_CONFIGMAP # get single env from configmap
+       valueFrom:
+         configMapKeyRef:
+           name: game-config
+           key: FROM_CONFIGMAP
+     volumes:				# volume inside the container as a file
+     - name: game-config
+       configMap:
+       - name: game-config
+```
+
+#### Secrets
+
+*ConfigMaps store data in a plain text format, so it defenetely not the good place to store credentials*
+
+*Secrets stored data in encoded format*
+
+##### Create Secret
+
+```bash
+kubectl create secret generic <secret-name> \
+    --from-literal=<key>=<value>
+kubectl create secret generic <secret-name> \
+    --from-file=app-secret.properties
+```
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: game-secret
+data: # values encoded by base64
+  FROM_CONFIGMAP: dmFsdWUy # echo -n "value" | base64
+  SECOND_ENV: dmFsdWU=
+```
+
+```bash
+$ # decode secret value
+$ echo -n "dmFsdWUy" | base64 --decode
+value
+```
+
+##### Use Secret in manifest file
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  -  image: nginx
+     name: nginx
+     envFrom: 				# use all env variables from secret
+     - secretRef:
+       name: game-secret
+     env:
+     - name: FROM_SECRET # get single env from secret
+       valueFrom:
+         secretKeyRef:
+           name: game-secret
+           key: FROM_SECRET
+     volumes: # volume as a files (will create one file per each key)
+     - name: game-secret
+       secret:
+       - name: game-secret
+```
+
+There are other better ways of handling sensitive data like passwords in Kubernetes, such as using tools like Helm Secrets, [HashiCorp Vault](https://www.vaultproject.io/).
+
+#### Scale
+
+```bash
+kubectl scale --replicas=5 replicaset new-replica-set
+kubectl scale deployment httpd-frontend-2 --replicas=3
+```
+
+#### Multi-Container pods
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: yellow
+spec:
+  containers:
+  - name: lemon
+    image: busybox
+  - name: gold
+    image: redis
+```
+
+**Usecase:**
+
+pod: *container1-app,* **container2-elasticsearch-loggingagent -> elasticsearch -> kibana**
+
+#### Init containers
+
+When a POD is first created the initContainer is run, and the process in the initContainer must run to a completion before the real container hosting the application starts. Each init container is run one at a time in sequential order. If any of the initContainers fail to complete, Kubernetes restarts the Pod repeatedly until the Init Container succeeds.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+spec:
+  containers:
+  - name: myapp-container
+    image: busybox:1.28
+    command: ['sh', '-c', 'echo The app is running! && sleep 3600']
+  initContainers:
+  - name: init-myservice
+    image: busybox:1.28
+    command: ['sh', '-c', 'until nslookup myservice; do echo waiting for myservice; sleep 2; done;']
+  - name: init-mydb
+    image: busybox:1.28
+    command: ['sh', '-c', 'until nslookup mydb; do echo waiting for mydb; sleep 2; done;']
+```
+
+#### Self Healing Applications
+
+Kubernetes supports self-healing applications through **ReplicaSets** and **Replication Controllers**. The replication controller helps in ensuring that a POD is re-created automatically when the application within the POD crashes. It helps in ensuring enough replicas of the application are running at all times.
+
+Kubernetes provides additional support to check the health of applications running within PODs and take necessary actions through **Liveness** and **Readiness** Probes.
+
