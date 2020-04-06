@@ -406,3 +406,39 @@ kubectl get events
 kubectl logs --namespce=kube-system my-scheduler
 ```
 
+---
+
+### Logging & Monitoring
+
+#### Monitoring
+
+*monitoring resource consumption*
+
+**Metrics:**
+**node-level** - number of nodes, healthy nodes, performance mertics (cpu, memory, disk, network)
+**pod-level** - num of pods, healhy pods, pods performance
+
+**Monitoring solutions:** Metrics Server, Elastic Stack, Prometheus
+
+##### Metrics-server
+
+*one server per cluster*
+*retrieves performance data from cluster components, aggregates it and stores in memory*
+*in-memory solution (doesn't store data history on the disk)*
+*uses **kubelet** as agent for retrieving metrics data*
+
+The **kubelet** also contains a subcomponent known as as cAdvisor or Container Advisor. cAdvisor is responsible for retrieving performance metrics from pods, and exposing them through the kubelet API to make the metrics available for the Metrics Server.
+
+GitHub: https://github.com/kubernetes/kubernetes/tree/master/cluster/addons/metrics-server, https://github.com/kubernetes-sigs/metrics-server
+
+```bash
+kubectl top pods
+kubectl top node
+```
+
+#### Logs managing
+
+```bash
+kubectl logs -f -namepod.container-name
+```
+
