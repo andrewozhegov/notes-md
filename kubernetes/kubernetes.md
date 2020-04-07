@@ -695,3 +695,122 @@ Kubernetes supports self-healing applications through **ReplicaSets** and **Repl
 
 Kubernetes provides additional support to check the health of applications running within PODs and take necessary actions through **Liveness** and **Readiness** Probes.
 
+---
+
+### Cluster Maintenance
+
+#### OS Upgrade
+
+0. Make all critical nodes unscdulebale (for no schedule evicted apps on it)
+
+```bash
+kubectl cordon node03
+```
+
+1. Make `node` unschedulable & evict all pods from there
+
+```bash
+kubectl drain node01 --ignore-daemonsets
+```
+
+drain node with daemonsets deployed on it
+
+**All pods not managed by ReplicationController, ReplicaSet, Job, DaemonSet or StatefulSet must be `--force`d**:
+
+```bash
+kubectl drain node02 --ignore-daemonsets --force
+```
+
+(after that unmanaged pods will be lost forever)
+
+2. Do any required OS updates
+
+3. Make `node` schedulable again
+
+```bash
+kubectl uncordon node01
+```
+
+(after that only new pods will be scheduled on node01, current pods will not be placed back immediately when node available again)
+
+#### Cluster Upgrade
+
+Current version of cluster: `kubectl get node -owide`
+
+Upgrade one node at a time while moving all workloads from it to another node.
+
+Get latest available version: `kubeadm upgrade plan`
+
+Do upgrades across all minor versions until reach latest.
+
+**Upgrading process:**
+
+1. Make upgradeble `node` unschedulable:
+
+```bash
+kubectl drain master --ignore-daemonsets
+```
+
+2. Upgrade `kubeadm` tool
+
+```bash
+sudo apt policy kubeadm | grep '1.17' # get full version string
+sudo apt-get install kubeadm=1.17.0-00 --no-install-recommends
+```
+
+3. Apply new cluster version
+
+```bash
+kubeadm upgrade apply v1.17.0
+```
+
+4. Upgrade `kubelet`
+
+```bash
+sudo apt install kubelet=1.17.0-00
+```
+
+5. Make `node` schedulable back
+
+```bash
+kubectl uncordon master
+```
+
+6. Upgrade another nodes:
+
+Drain node
+SSH into it
+Upgrade `kubeadm` and `kubelet`
+Logout
+Upgrade `node` from master:
+
+```bash
+kubeadm upgrade node --kubelet-version v1.17.0
+```
+
+Uncordom node: `kubectl uncordon node01`
+
+#### Backup & Restore
+
+Get all required information about etcd from Command: `kubectl describe pods etcd-master`
+
+(**listen-client-urls, peer-trusted-ca-file, cert-file, key-file**)
+
+* Do backup `etcd`:
+
+```bash
+ETCDCTL_API=3 etcdctl --endpoints=https://[127.0.0.1]:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot save /tmp/snapshot-pre-boot.db
+```
+
+* Restore from backup file
+
+*additional fields:* node-name, desctination data-dir, initial-cluster, initial-cluster-token, initial-advertise-peer-urls
+
+```bash
+ETCDCTL_API=3 etcdctl --endpoints=https://[127.0.0.1]:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --name=master --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key --data-dir /var/lib/etcd-from-backup --initial-cluster=master=https://127.0.0.1:2380  --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls=https://127.0.0.1:2380   snapshot restore /tmp/snapshot-pre-boot.db
+```
+
+* Modify */etc/kubernetes/manifests/etcd.yaml*
+
+update etcd static pod to use new data dir, initial-cluster-token, volumes & volume mounts
+
