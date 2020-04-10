@@ -814,3 +814,450 @@ ETCDCTL_API=3 etcdctl --endpoints=https://[127.0.0.1]:2379 --cacert=/etc/kuberne
 
 update etcd static pod to use new data dir, initial-cluster-token, volumes & volume mounts
 
+---
+
+### Security
+
+#### Authentication
+
+**Role Based Access Contrlos** - users associated with groupds with specific permissions.
+
+**Users** (Admins & Developers) - access (through kubectl or api) managed by `kube-apiserver`.
+
+* list of user & passwords in a static password file
+
+specify `csv` file in a `--basic-auth-file` field on `kube-apiserver` ExecStart cmd:
+
+```csv
+pass1,user1,u001,group1
+pass2,user2,u002
+```
+
+add volume & volumeMout this file to `kube-apiserver`
+
+```bash
+curl -v -k https://master-node-ip:6443/api/v1/pods -u "user1:pass1"
+```
+
+* useranme & tokens in a static token file
+
+```csv
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX,user1,u001,group1
+```
+
+add volume & volumeMout this file to `kube-apiserver`
+
+specify filename in `--token-auth-file` arg
+
+use token:
+
+```bash
+curl -v -k https://master-node-ip:6443/api/v1/pods --header "Authorization: Bearer XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+```
+
+* certificates
+
+```bash
+curl https://master-node-ip:6443/api/v1/pods \
+--key admin.key \
+--cert admin.crt \
+--cacert ca.crt
+```
+
+```bash
+kubectl get pods \
+--server master-node-ip:6443 \
+--client-key admin.key \
+--client-certificate admin.crt \
+--certificate-authority ca.crt
+```
+
+also can be done by **KubeConfig**
+
+```bash
+kubectl get pods \
+--kubeconfig admin-kubeconfig.yaml \
+```
+
+* third-party auth services (LDAP etc.)
+
+**Services** (External programs) - manages through **ServiceAccounts**
+
+#### TLS
+
+By default all crts located in `/etc/kubernetes/pki`
+
+**TODO: Photo**
+
+* Create certificate:
+
+1. Generate private and public keypair (public key names: *.key* or *-key.pem*)
+
+```bash
+openssl genrsa -out my.key 1024				# public
+openssl rsa -i my.key -pubout > my.pem		# private
+```
+
+2. Create Certificate Signing Request
+
+```bash
+openssl req -new -key my.key -out my.csr -subj "/C=US/ST=CA/O=MyOrg, Inc./CN=my-key.com"
+```
+
+3. Sign public key with CSR to get a CRT
+
+```bash
+openssl x509 -req -in /etc/kubernetes/pki/apiserver-etcd-client.csr \
+-CA /etc/kubernetes/pki/etcd/ca.crt \
+-CAkey /etc/kubernetes/pki/etcd/ca.key \
+-CAcreateserial \
+-out /etc/kubernetes/pki/apiserver-etcd-client.crt
+```
+
+* Get information about `crt`:
+
+```bash
+openssl x509 -in /etc/kubernetes/pki/apiserver.crt -text
+```
+
+**Fix some of the TLS issues**
+
+* check `etcd` logs (since kubectl doesn't have connection to server, use docker itself)
+
+```bash
+$ docker logs k8s_etcd_etcd-master_kube-system_49066928fac6c601adc44cc0d3c60674_4
+```
+
+`2020-03-15 08:53:33.253857 C | etcdmain: open /etc/kubernetes/pki/etcd/server-certificate.crt: no such file or directory` means that file doesn't exist or broken
+
+**Fix**: Specify corrent path to file in `/etc/kubernetes/manifests/etcd.yaml`
+
+* **etcd** logs `2020-03-15 09:02:30.385037 I | embed: rejected connection from "127.0.0.1:57620" (error "remote error: tls: bad certificate", ServerName "")`
+
+    **apiserver** logs: `W0315 09:04:34.564733       1 clientconn.go:1120] grpc: addrConn.createTransport failed to connect to {https://127.0.0.1:2379 0  <nil>}. Err :connection error: desc = "transport: authentication handshake failed: x509: certificate signed by unknown authority". Reconnecting...`
+
+Check sertificates last update datetime: `ls -la /etc/kubernetes/pki`
+
+Check manifests last update datetime: `ls -la /etc/kubernetes/manifests`
+
+**Fix**: `kube-apiserver.yaml`
+
+* **etcd** logs: `2020-03-15 09:16:45.660414 I | embed: rejected connection from "127.0.0.1:60204" (error "tls: failed to verify client's certificate: x509: certificate has expired or isnot yet valid", ServerName "")` mans that `crt` is expired
+
+**Fix:** Check all certificates date and resign the expired ones!
+
+#### TLS in Kubernetes
+
+![image-20200315132918811](../.img/image-20200315132918811.png)
+
+![image-20200315132847694](../.img/image-20200315132847694.png)
+
+#### Certificates API
+
+the process of signing new certificates for new admins
+
+`CertificateSigningRequest` can be `Reviewd` and `Approved` ba admins using kubectl
+
+**Controller Manager** does all this by csr-approving, csr-signing managers.
+
+**Process:**
+
+1. new admin `jane` creates private key and CSR
+
+```bash
+openssl genrsa -out jane.key 2048
+openssl req -new -key jane.key -subj "/CN=jane" -out jane.csr
+```
+
+2. admin creates  `CertificateSigningRequest`
+
+```yaml
+cat <<EOF | kubectl apply -f -
+apiVersion: certificates.k8s.io/v1beta1
+kind: CertificateSigningRequest
+metadata:
+  name: jane
+spec:
+  request: $(cat jane.csr | base64 | tr -d '\n')
+  usages:
+  - digital signature
+  - key encipherment
+  - server auth
+EOF
+```
+
+3. List all requests
+
+```bash
+kubectl get csr
+```
+
+4.  Approve request
+
+```bash
+kubectl certificate approve jane
+```
+
+#### KubeConfig
+
+file with specified certificates for auth
+
+by default k8s looking for this file in `~/.kube/config`
+
+**Clusters** list of available clusters (url)
+
+**Users** list of users with different privileges (keys & crts) (by **RBAC**)
+
+**Contexts** - defines witch user accont wiill be used to whick cluster
+
+```yaml
+apiVersion: v1
+kind: Config
+current-context: admin@clister-playground # default
+clusters:
+- name: clister-playground
+  cluster:
+  	certification-authority: /etc/kubernetes/pki/ca.crt
+  	# or certification-authority-data with base64 encoded CRT
+  	server: https://clister-playground:6443
+contexts:
+- name: admin@clister-playground
+  context:
+    cluster: clister-playground
+    user: admin
+    namespace: my-namespace
+users:
+- name: admin
+  user:
+    client-certificates: /etc/kubernetes/pki/admin.crt
+    client-key: /etc/kubernetes/pki/admin.key
+```
+
+```bash
+kubectl config view
+kubectl config use-context admin@clister-playground # change default context
+```
+
+#### API Groups
+
+![image-20200315152933490](../.img/image-20200315152957339.png)
+
+![image-20200315153034357](../.img/image-20200315153034357.png)
+
+https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.13
+
+#### Role Based Access Controls (RBAC): Role & RoleBinding
+
+*always related to namespace (default by default)*
+
+* Create role for users
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: default
+  name: pod-reader
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods"]
+  resourceNames: ["blue"] # user can read only 'blue' pod
+  verbs: ["get", "watch", "list"]
+```
+
+* Link user to this role using `RoleBinding`
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+# This role binding allows "jane" to read pods in the "default" namespace.
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: default
+subjects:
+- kind: User
+  name: jane # Name is case sensitive
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role #this must be Role or ClusterRole
+  name: pod-reader # this must match the name of the Role or ClusterRole you wish to bind to
+  apiGroup: rbac.authorization.k8s.io
+```
+
+* View roles & rolebindings
+
+```bash
+kubectl get roles
+kubectl get rolebindings
+kubectl describe role pod-reader
+kubectl describe rolebinding read-pods
+```
+
+* Check users abilities (can `jane` delete pods in a test namespace?)
+
+```bash
+kubectl auth can-i delete pods --namespace test
+kubectl get pdos --as jane
+```
+
+#### RBAC: ClusterRole & ClusterRoleBinding
+
+*do not related to namespace unlike Roles&Rolebindings*
+
+**ClusterRoles** to manage Cluster wide resources like nodes can't be associated with particular namespaces. (Nods, Persistant Volumes, ClusterRoles, ClusterRoleBindings, Certificate Signing Requests, Namespaces)
+
+```bash
+kubectl api-recources --namespaced=false # get cluster scoped resources
+```
+
+**Example:** view, update and delete nodes.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-manager
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list", "get", "create", "delete"]
+```
+
+* `ClusterRoleBinding` to link user with `ClusterRole`
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: jane-node-manager
+subjects:
+- kind: User
+  name: jane # Name is case sensitive
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: node-manager
+  apiGroup: rbac.authorization.k8s.io
+```
+
+*Atlso can be used to get user access to manage resource across all namespaces!*
+
+#### Image security
+
+*configuring pods to use images from a secure private container registries*
+
+* Docker approach
+
+Login into a private registry at first:
+
+```bash
+docker login private-registry.io
+docker run private-registry.io/apps/private-image
+```
+
+* Kubernetes approach
+
+secret with private registry credentials
+
+```bash
+kubectl create secret docker-registry private-registry-io \
+	--docker-server=private-registry.io \
+	--docker-username= \
+	--docker-password= \
+	--docker-email=
+```
+
+then specify secret with special credentials under `imagePullSecrets`
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+spec:
+  containers:
+  -  image: private-registry.io/apps/nginx
+     name: nginx
+  imagePullSecrets:
+   - name: private-registry-io
+```
+
+#### Security contexts
+
+*some additional container run args such as linux capabilities or user specifying can be configured in k8s through `Security Contexts`*
+
+`Linux capabilities` allow you to break apart the power of root into smaller groups of privileges (http://man7.org/linux/man-pages/man7/capabilities.7.html).
+
+* Pod level (will impact all containers in pod)
+* Container level (will rewrite pod-level contexts)
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-sleeper
+spec:
+  securityContext: # pod-level conf
+    runAsUser: 1000
+  containers:
+  -  image: ubuntu
+     name: ubuntu
+     command: ["sleep", "3600"]
+     securityContext: # container-level conf
+      runAsUser: 0 # rewrite
+      capabilities:
+        add: ["MAC_ADMIN"]
+```
+
+#### Network policy
+
+*can allow traffic reach some pod only through another specific pod*
+
+* **Ingress** - income traffic
+* **Egress** - outgoing traffic
+
+**Example:** allow trafic to reach the DB pod only through DB-API pod.
+
+By default k8s configured with `All Allow` rule to make pods available from any another pods or services.
+
+**Network Policy** rule example: only allow traffic on 3306 port from the DB-API pod.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-policy
+spec:
+  podSelector:
+    matchLabels: # select the required pod
+      role: db
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          role: db-api
+    ports:
+    - protocol: TCP
+      port: 3306
+  egress: # multiple
+  - to:
+    - podSelector:
+        matchLabels:
+          name: mysql
+    ports:
+    - protocol: TCP
+      port: 3306
+  - to:
+    - podSelector:
+        matchLabels:
+          name: nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+```
+
+*Flannel doesnt support network policies!*
+
