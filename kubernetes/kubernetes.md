@@ -1431,3 +1431,1057 @@ spec:
         claimName: myclaim
 ```
 
+---
+
+### Networking
+
+#### Switching Routing
+
+*swith creating a network between machines*
+
+![image-20200318130414061](../.img/image-20200318130414061.png)
+
+* get list of interfaces
+
+*eth0 will be used to connect to the switch*
+
+```bash
+ip link
+```
+
+* connect to 192.168.1.0 network
+
+assign 192.168.1.10 address to eth0 interface (which is connected to network)
+
+```bash
+ip addr add 192.168.1.10/24 dev eth0
+ip addr # get addresses assigned to interfaces
+```
+
+**Set those changes in /etc/network/interfaces to make it reboot safe!** 
+
+* do the same from another machine in the network ...
+
+* now machines can ping each other
+
+```bash
+ping 192.168.1.11
+```
+
+##### Communication between networks
+
+*Router helps connect two networks together*
+
+![image-20200318130942762](../.img/image-20200318130942762.png)
+
+* get routing table
+
+```bash
+ip route
+```
+
+*if there is no any routes, it means that machines in the current network can not reach machines in another network **(Gateway requred)***
+
+**Gateway**  - specify how can machine from current network reach machines from another network. **Example for B:**
+
+```bash
+ip route add 192.168.2.0/24 via 192.168.1.1
+```
+
+*means B can reach 192.168.2.0 by using 192.168.1.1 gateway (router)*
+
+##### Internet access
+
+*any network doesn't exist in current network goes through **Default Gateway***
+
+**Example:** if there is another router with internaet access, configure default gateway like this
+
+```bash
+ip reute add default via 192.168.2.2
+```
+
+***Default Gateway is goot place to start network troubleshooting!***
+
+##### Setup linux host as a router
+
+![image-20200318133809964](../.img/image-20200318133809964.png)
+
+```bash
+# host A (already in network with B thrue switch)
+ip route add 192.168.2.0/24 via 192.168.1.6
+```
+
+```bash
+# host C (already in network with B thrue switch)
+ip route add 192.168.1.0/24 via 192.168.2.6
+```
+
+```bash
+# host B
+# allow forwarding packages from eth0 to eth1
+echo 1 > /proc/sys/net/ipv4/ip_forward # untill next reboot
+# cat /etc/sysctl.conf | grep ip_forward # better to change here
+```
+
+#### DNS
+
+![image-20200318141032131](../.img/image-20200318141032131.png)
+
+```bash
+# host A
+echo "192.168.1.11 db" >> /etc/hosts
+ping db # success
+```
+
+Network will grows and it will be uncomfortable to add new entries in host files on each host every time new host will be added to network. Also changins any hosts IP will require to add new ip on every other **/etc/hosts**.
+
+**DNS Server** - a machime in the network which stores all dns records, however others hosts just know dns-servers ip.
+
+*/etc/resolv.conf*
+
+```
+nameserver 192.168.1.100
+Forward All to 8.8.8.8 # forward all other unresolved dns names to google
+```
+
+*Local **/etc/hosts** preffered by default! (can be changed in /etc/nsswitch.conf)*
+
+##### Configure local dns server to resolve names wothout highlevel domain names
+
+**web.myconpany.com** available as just **web** inside mycompany's network
+
+*/etc/hosts*
+
+```
+search mycompany.com
+```
+
+##### Record types
+
+![image-20200318143120918](../.img/image-20200318143120918.png)
+
+##### Check DSN server
+
+```bash
+nslookup www.google.com
+dig www.google.com
+```
+
+#### CoreDNS
+
+https://github.com/coredns/coredns
+
+```bash
+./coredns # by default will listens on port 53
+```
+
+##### specifying hosts in *Corefile*
+
+```
+. {
+  hosts /etc/hosts
+}
+```
+
+https://github.com/kubernetes/dns/blob/master/docs/specification.md
+https://coredns.io/plugins/kubernetes/
+
+#### Network Namespaces
+
+*uses to hide (separate) the processes from the host or from each others (network isolation)*
+*root user can see processes from containers by `ps aux` (with different pid)*
+
+Address Resolution Protocol (**ARP**) is the method for finding a host's Link Layer (**MAC address**) when only its IP address is known. The **ARP table** is used to maintain a correlation between each **MAC address** and its corresponding IP address.
+
+**Namespace can have it's own virtual interfaces, routing tables and ARP tables.**
+
+```bash
+ip netns add my-ns # create new namespace
+ip netns # list namespaces
+
+# host's interfaces isn't available from namespace!
+ip netns exec my-ns ip link # list interfaces inside the ns
+ip -n my-ns link # same
+
+# Host's ARP entries also isn't available from the NS
+ip netns exec my-ns arp
+
+# Host's routes isn't available from the NS
+ip netns exec my-ns route
+```
+
+##### Connect two namespaces with virtial network
+
+*using virtual ethernet (pipe)*
+
+```bash
+# we already have two namespaces: 'red' and 'blue'
+
+# 1. create virtual ethernet cable
+# (name it's ends/interfaces as veth-red & veth-blue)
+ip link add veth-red type veth peer name veth-blue
+
+# 2. attach each veth interface to the appropriate NS
+ip link add set veth-red netns red
+ip link add set veth-blue netns blue
+
+# 3. assign IP to each of this namespaces
+ip -n red addr add 192.168.15.1 dev veth-red
+ip -n blue addr add 192.168.15.2 dev veth-blue
+
+# 4. bring links UP
+ip -n red link set veth-red up
+ip -n blue link set veth-blue up
+
+# now namespaces identifies each other with ARP entries
+```
+
+##### Connect more than two namespaces using bridge
+
+*using virtual switch*
+
+There is many solutions to create a vrtual switch: **Linux Bridge** (native), Open vSwitch, etc.
+
+```bash
+# add new interface to the host (bridge)
+ip link add v-net-0 type bridge
+
+# bring new interface up
+ip link set dev v-net-0 up
+
+# delete link from red namespace (autodeletes another veth-blue)
+ip -n red link del veth-red
+
+# connect namespaces to this new virtual switch
+ip link add veth-red type veth peer name veth-red-br
+ip link add veth-blue type veth peer name veth-blue-br
+
+# attach veth interfaces to the namespaces
+ip link add set veth-red netns red
+ip link add set veth-blue netns blue
+
+# attack veth's br interfaces to the bridge
+ip link set veth-red-br master v-net-0
+ip link set veth-blue-br master v-net-0
+
+# set IPs to this links
+ip -n red addr add 192.168.15.1 dev veth-red
+ip -n blue addr add 192.168.15.2 dev veth-blue
+
+# bring interfaces up
+ip -n red link set veth-red up
+ip -n blue link set veth-blue up
+```
+
+![image-20200318163812716](../.img/image-20200318163812716.png)
+
+##### Virtual Network available from the host
+
+```bash
+# make all namespaces from the v-net-0 available from host
+# just from the host assign an ip address to v-net-0 interface
+ip addr add 192.168.15.5/24 dev v-net-0
+```
+
+##### Make Vitrual Network available from outside the host
+
+*from another host in LAN connected through **eth0***
+
+![image-20200318165532299](../.img/image-20200318165532299.png)
+
+*Use host as Gateway to outsde through the bridge*
+
+```bash
+ip netns exec blue ip route add 192.168.1.0/24 via 192.168.15.5
+```
+
+*Now make blue NS available from 192.168.1.3:*
+
+Host network have it's own internal priveate address (192.168.15.2), and destination network (192.168.1.3) don't know adout it, so it can't reach back.
+
+We need NAT enabled on the host acting as the Gateway. So it can send messages to the LAN in it's own name with it's own address.
+
+```bash
+iptables -t nat -A POSTROUTING -s 192.168.15.0/24 -j MASQUERADE
+```
+
+Add a new rule in the NAT IP table in the POSTROUTING chain to masquerade or replace the from address on all packets coming from the source network 192.168.15.0 with its own IP address.
+
+**That way anyone receiving these packets outside the network will think that they are coming from the host and not from within the namespace.**
+
+**Or basically add a route entry to the second host telling that host that the network 192.168.15 can be reached through the host at 192.168.1.2.**
+
+##### Allow namespaces to reach the Internet
+
+*add default Gateway to host (use host to reach any external network)*
+
+```bash
+ip netns exec blue ip route add default via 192.168.15.5
+```
+
+#### Docker Networking
+
+```bash
+docker run --namespace none nginx	# conpletely isolated from host
+docker run --namespace host nginx	# attached to host network
+docker run --namespace bridge nginx	# creation internal bridge
+```
+
+##### Docker Bridge Network
+
+172.17.0.0 by default: **docker0**
+
+![image-20200318180653881](../.img/image-20200318180653881.png)
+
+```bash
+# docker creates namespaces for containers
+# get namespace from containes (SandboxID)
+docker inspect <container>
+```
+
+*container(ns) connects to the dokcer0 interface through veth*
+
+*every NS have it's ip in docker0 virtual network*
+
+##### Docker containers ports mapping to outside
+
+```bash
+docker run -p 8080:80 nginx
+```
+
+![image-20200318180921320](../.img/image-20200318180921320.png)
+
+*Docker adds the rule to the docker chain and sets destination to include the containers IP as well you can see the rule docker creates when you list the rules in iptables.*
+
+```bash
+iptables \
+	–t nat \
+	-A PREROUTING \
+	-j DNAT \
+	--dport 8080 \
+	--to-destination 80
+	
+iptables \
+	–t nat \
+	-A DOCKER \
+	-j DNAT \
+	--dport 8080 \iptables -t nat -A POSTROUTING -s 192.168.15.0/24 -j MASQUERADE
+	--to-destination 172.17.0.3:80
+```
+
+#### CNI
+
+##### Creating Namespace Network
+
+1.  Create network NAMESPACE
+2.  Create BRIDGE/interface
+3.  Create VETH pairs (PIPE)
+4.  Attach VETH to NAMESPACE
+5.  Attach other VETH  to BRIDGE
+6.  Assign IP address with connected NAMESPACES
+7.  Bring interfaces UP
+8.  Enable NAT - IP Masquerade
+
+*This steps same for Docker, Mesos, Kubernetes etc.*
+
+*So 2 - 8 steps are moved into a single prigramm called **Bridge**.*
+
+*Docker & Kubernetes are only creates a Namespace and then run a **Bridge** programm.*
+
+##### Add container to a particular namespace:
+
+```bash
+bridge add 2e34dcf34 /var/run/netns/2e34dcf34
+```
+
+*Whenever rkt or kubernetes creates a new container, they call the bridge plugin and pass the container id and namespace to get networking configured for that container.*
+
+##### Container Network Interface
+
+**CNI** - a set standards that define how programs should be developed to solve networking challenges in a container runtime environment.
+
+*Bridge programm is a plugin for CNI*
+
+![image-20200319092116453](../.img/image-20200319092116453.png)
+
+*Docker doesn't implements **CNI** it comes with it's own set of standarts - **CNM** (Container Network Model).*
+
+So Kubernetes creates Docker containers with `none` network:
+
+```bash
+docker run --network=none nginx
+```
+
+And then run the configured CNI plugin to take care of the rest of configuration:
+
+```bash
+bridge add 2e34dcf34 /var/run/netns/2e34dcf34
+```
+
+#### Cluster Networking
+
+*networking configuration on a cluster nodes*
+
+##### Required configuration
+
+Each node must have at least one interface connected to a network with IP address assigned.
+
+Host must have a unique hostname and MAC address.
+
+**Required open ports**
+
+![image-20200319224046011](../.img/image-20200319224046011.png)
+
+*ETCD server listens on port 2379.*
+*For multiple masters also you need additional port 2380 open so the ETCD clients can communicate with each other.*
+
+[List of required open ports](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/#check-required-ports)
+
+#### Pod Networking
+
+*All pods should have assigned IP addresses. and be able to communicate with any pods within the cluster on the same node and on the other nodes without any NAT riles.*
+
+```bash
+ip link add v-net-0 type bridge
+ip link set dev v-net-0 up
+ip addr add 192.168.15.5/24 dev v-net-0
+
+ip link add veth-red type veth peer name veth-red-br
+ip link set veth-red netns red
+ip link set veth-red-br master v-net-0
+
+ip -n red addr add 192.168.15.1 dev veth-red
+ip -n red link set veth-red up
+
+ip netns exec blue ip route add 192.168.1.0/24 via 192.168.15.5
+
+iptables -t nat -A POSTROUTING -s 192.168.15.0/24 -j MASQUERADE 
+```
+
+**Workflow**
+
+![image-20200320001120138](../.img/image-20200320001120138.png)
+
+
+```bash
+# create virtual bridge interface v-net-0 on each node
+ip link add v-net-0 type bridge
+
+# up virtual interface on each node
+ip link set dev v-net-0 up
+
+# assign an ip address to bridge on each node
+ip addr add 10.244.1.1/24 dev v-net-0
+```
+
+./net-script.sh (for adding a namespace to a network)
+
+```bash
+# for each container (namespace)
+# * create veth pair (pipe)
+ip link add veth-red type veth peer name veth-red-br
+# * attach veth pair
+ip link set veth-red netns red
+ip link set veth-red-br master v-net-0
+# * assign ip address to namespace
+ip -n red addr add 192.168.15.1 dev veth-red
+# * add default Gateway inside red NS through
+ip -n red route add default via 192.168.15.1
+# * bring up interface
+ip -n red link set veth-red up
+```
+
+```bash
+# add route to v-net-0 on another node (for each another node)
+# we can reach namespace 10.244.1.2 through 192.168.1.11 node
+ip route add 10.244.1.2 via 192.168.1.11
+
+# so many configuration when cluster grows
+# better configure BRIDGES to use host interface as a default gateway
+```
+
+**Bring script to a necessary interface (ADD and DEL cmds)**
+
+*kubelet runned with `--cni-conf-dir`*
+
+*kubelet get's script path from `--cni-bin-dir`*
+
+*and then runs script with add command uses container and namespace as arguments*
+
+![image-20200320092343729](../.img/image-20200320092343729.png)
+
+#### CNI in Kubernetes
+
+![image-20200320093348499](../.img/image-20200320093348499.png)
+
+`/opt/cni/bin` contains bridge programm
+
+`/etc/cni/net.d` contains json bridge confiuration
+
+`/etc/cni/net.d/10-bridge.conf`
+
+```json
+{
+    "cniVersion": "0.2.0",
+    "name": "mynet",
+    "type": "bridge",
+    "bridge": "cni0",
+    "isGateway": true,
+    "ipMasq": true,
+    "ipam": { 
+        "type": "host-local",
+        "subnet": "10.22.0.0/16", 
+        "routes": [ 
+            { 
+                "dst": "0.0.0.0/0" 
+            } 
+        ] 
+    } 
+}
+```
+
+##### CNI Weave
+
+*Weave CNI place an agent deploymant on each node in the cluster*
+
+*all agents connected and communicate between each other*
+
+*every agent knows about pods on it's node*
+
+![image-20200325230337942](../.img/image-20200325230337942.png)
+
+##### How package goes from pod11 on node1 to pod21 on node2
+
+1.  pod11 send package (specifying destination pod: pod21) to weave-agent1 on it's node (node1)
+2.  weave-agent1 on node1 knows that weave-agent2 on node2 responsible for recieving packages for pod21
+3.  weave-agent1 wrap package for pod21 in a new package (specify weave-agent2 as destination)
+4.  weave-agent2 open recieved pacakge and gets the original package for pod21
+5.  weave-agent2 send package to pod21 on it's node
+
+##### Weave in details
+
+![image-20200325231158360](../.img/image-20200325231158360.png)
+
+*   *weaveworks agent service deployed on each node*
+*   *each agent stores the topology of the entire setup (where the pods and ip of them)*
+*   *weave create it's own bridge on each node*
+
+##### Deploy Weave CNI
+
+https://www.weave.works/docs/net/latest/kubernetes/kube-addon/
+
+```bash
+kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+```
+
+#### IP Address Management in CNI
+
+*Nodes ip manages by external ipam.*
+
+*CNI **bridge program** responsible for assigning ip to node's bridge and pods.*
+
+*CNI stores list of ip like (ip, status, pod) using build-in plugins: **DHCP**, **host-local***
+
+![image-20200326091543006](../.img/image-20200326091543006.png)
+
+`/etc/cni/net.d/net-script.conf` 
+
+```yaml
+{
+	cniVersion": "0.2.0",
+	"name": "mynet",
+	"type": "net-script",
+	"bridge": "cni0",
+	"isGateway": true,
+	"ipMasq": true,
+	"ipam": {
+		"type": "host-local", 			# build-in plugin
+		"subnet": "10.244.0.0/16",		# ip range for pods
+		"routes": [
+			{ "dst": "0.0.0.0/0" }		#
+		]
+	}
+}
+```
+
+*weave cni does it automatocly*
+
+#### Service Networking
+
+*pods do not communicate between each other directly*
+
+*to allow any trafic from outside reach the pod, the pod needed to be exposed with **service***
+
+*pod1 can reach other pod2 through it's **service-pod2** ip or name*
+
+*service is accessible from any part of the cluster (service hosts across the cluster)* 
+
+##### Kinds of Services
+
+1.  **ClusterIP** - a service accessible only within the cluster, allocates an internal IP that other components can use to access pod.
+2.  **TargetPort** - a service accessible only within the cluster, make application **listen port** available to other components through **service-port**
+3.  **NodePort** - works as ClusterIP, but also exposes apllication port as service-port [30000; 32767] on all the nodes and makes application available from outside the cluster.
+4.  **External IPs**
+5.  **LoadBalancer**
+6.  **Ingress**
+
+##### kube-proxy
+
+*watches the changes in the cluster through kube-apiserver, and every time a new service is to be created, kube-proxy assign an IP address from a pre-defined range*
+
+![image-20200326191720782](../.img/image-20200326191720782.png)
+
+The kube-proxy components running on each node, get’s that IP address and creates forwarding rules on each node in the cluster, saying any traffic coming to this IP (IP of the service), should go to the IP of the POD.
+
+Whenever services are created or deleted the kube-proxy component creates or deletes these rules.
+
+##### kube-proxy modes
+
+1.  userspace - listens on a port for each service and proxies connections to the pods;
+2.  iptables (default) - using iptables rules;
+3.  ipvs - creating ipvs rules.
+
+```bash
+kube-proxy --proxy-mode [userspace|iptables|ipvs]
+```
+
+##### kube-proxy iptables example
+
+Set ip range to 10.96.0.0 - 10.111.255.255:
+
+``` bash
+kube-apiserver --service-cluster-ip-range=10.96.0.0/12 ...
+```
+
+*ip ranges for pods and for services shouldn't have same ips*
+
+Find iptables rules created by kube-proxy for services (in case `my-service`):
+
+```bash
+iptables -L -t net | grep my-servise
+```
+
+*because all iptables rules for services commented with service name*
+
+```bash
+# nodes ip range from node interfaces configuration
+ip addr
+# pods ip range from cni configuration
+kubectl logs weave-net-xxxxx weave -n kube-system | grep ipalloc-range
+# services ip range from kube-apiserver run arguments
+ps aux | grep apiserver | grep ip-range
+# kube-proxy mode from kube-proxy container logs
+kubectl logs kube-proxy-ddrrw -n kube-system
+```
+
+#### kube-dns
+
+*allow name resolution for services and pods within the cluster*
+
+When a service is created `kube-dns` creates a DNS record and maps service-name to it's address. Then any pod in cluster can reach service using it's name.namespace (if different). 
+
+DNS disabled for pods by default.
+
+![image-20200326235738251](../.img/image-20200326235738251.png)
+
+#### CoreDNS in Kubernetes
+
+*deploys as a deployment in a `kube-system` namespace*
+
+`/etc/coredns/Corefile`  is **ConfigMap**
+
+```json
+.:53 {
+	errors
+	health
+	kubernetes cluster.local in-addr.arpa ip6.arpa { # specify high domain
+		pods insecure 					     # enable dns records for pods
+		upstream
+		fallthrough in-addr.arpa ip6.arpa
+	}
+	prometheus :9153
+	proxy . /etc/resolv.conf
+	cache 30
+	reload
+}
+```
+
+##### Add coredns as nameserver to new pods
+
+*coredns exposes with service called **kube-dns***
+
+*kube-dns adds as a nameserver to a new pods automaticly by **kubelet**:*
+
+`/var/lib/kubelet/config.yaml`
+
+```yaml
+...
+clusterDNS:
+- 10.96.0.10
+clusterDomain: cluster.local
+...
+```
+
+#### Ingress
+
+**Bad solution**
+
+![image-20200327235322908](../.img/image-20200327235322908.png)
+
+*using a lot of load-balancers (witch is too expencive)*
+
+*requires reconfiguring services every time a new application added*
+
+**Ingress solution**
+
+Ingress helps your users access your application using a single Externally accessible URL, that you can configure to route to different services within your cluster. And implemet SSL security as well.
+
+![image-20200328000655117](../.img/image-20200328000655117.png)
+
+##### Ingress in close look
+
+![image-20200328001548040](../.img/image-20200328001548040.png)
+
+**Controller** - third-party load-banalcing solution deployed. Not a usual load-balancer, but have additional intelligence built into them to monitor the kubernetes cluster for new definitions or ingress resources and configure the nginx server accordingly.
+
+**Resources** - set of rules for colntroller, created using definition files.
+
+##### Basic architecture
+
+![image-20200112161057795](../.img/image-20200112161057795.png)
+
+##### Setup process
+
+1. Create a **namespace** for all ingress components
+
+`kubectl create namespace ingress-space`
+
+2. Create empty **ConfigMap** (for all specific NGINX Controller configuration)
+
+`kubectl create configmap --namespace=ingress-space nginx-configuration`
+
+*now it's empty, but can be used to modify ingress configuration in future*
+
+3. Create **ServiceAccount** (right cluster-managing permissions for NGINX Conltroller)
+
+`kubectl create serviceaccount --namespace=ingress-space ingress-serviceaccount`
+
+4. **Role & RoleBinding** + **ClusterRole & ClusterRoleBinding** for `ingress-serviceaccount`
+
+**Role**
+
+```bash
+kubectl get role --namespace=ingress-space ingress-role -oyaml
+```
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  creationTimestamp: "2020-03-28T15:20:39Z"
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+  name: ingress-role
+  namespace: ingress-space
+  resourceVersion: "1806"
+  selfLink: /apis/rbac.authorization.k8s.io/v1/namespaces/ingress-space/roles/ingress-role
+  uid: 40262e5a-aa37-412f-bdda-981acf129d9e
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - pods
+  - secrets
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resourceNames:
+  - ingress-controller-leader-nginx
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - endpoints
+  verbs:
+  - get
+```
+
+**RoleBinding**
+
+```bash
+kubectl get rolebinding --namespace=ingress-space ingress-role-binding -oyaml
+```
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  creationTimestamp: "2020-03-28T15:20:39Z"
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+  name: ingress-role-binding
+  namespace: ingress-space
+  resourceVersion: "1807"
+  selfLink: /apis/rbac.authorization.k8s.io/v1/namespaces/ingress-space/rolebindings/ingress-role-binding
+  uid: 947b8644-6f1a-47cc-8fba-6bdde2c8d3f0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ingress-role
+subjects:
+- kind: ServiceAccount
+  name: ingress-serviceaccount
+```
+
+**ClusterRole**
+
+```bash
+kubectl get clusterrole --namespace=ingress-space ingress-clusterrole -oyaml
+```
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: "2020-03-28T15:20:39Z"
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+  name: ingress-clusterrole
+  resourceVersion: "1805"
+  selfLink: /apis/rbac.authorization.k8s.io/v1/clusterroles/ingress-clusterrole
+  uid: 66bfce52-a26c-4141-929e-4eee6b81c8ce
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - endpoints
+  - nodes
+  - pods
+  - secrets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses/status
+  verbs:
+  - update
+```
+
+**ClusterRoleBinding**
+
+```bash
+kubectl get clusterrolebindings.rbac.authorization.k8s.io --namespace=ingress-space ingress-clusterrole-binding -oyaml
+```
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  creationTimestamp: "2020-03-28T15:20:39Z"
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+  name: ingress-clusterrole-binding
+  resourceVersion: "1808"
+  selfLink: /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/ingress-clusterrole-binding
+  uid: ad469988-cee5-4e14-b527-422cbc8ea307
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ingress-clusterrole
+subjects:
+- kind: ServiceAccount
+  name: ingress-serviceaccount
+  namespace: ingress-space
+```
+
+5. Deploy NGINX **Ingress Controller**
+
+```yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-controller
+  namespace: ingress-space
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: nginx-ingress
+  template:
+    metadata:
+      labels:
+        name: nginx-ingress
+    spec:
+      serviceAccountName: ingress-serviceaccount
+      containers:
+        - name: nginx-ingress-controller
+          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.21.0
+          args:
+            - /nginx-ingress-controller
+            - --configmap=$(POD_NAMESPACE)/nginx-configuration
+            - --default-backend-service=app-space/default-http-backend
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+```
+
+6. Create **Ingress Service** to make it available from outside
+
+`kubectl expose deployment -n ingress-space ingress-controller --type=NodePort --port=80 --name=ingress --dry-run -o yaml > ingress.yaml`
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress
+  namespace: ingress-space
+spec:
+  type: NodePort
+  selector:
+    name: nginx-ingress
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30080
+      name: http
+    - protocol: TCP
+      port: 443
+      targetPort: 443
+      name: https
+```
+
+7. Create Ingress Resource to make applications inside deployments available on different URLs
+
+**Splitting trafic by paths**
+
+```yaml
+apiVersion: extentions/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-wear-watch
+  namespace: app-space
+  annotations:
+    # an opetion of nginx-ingres-controller
+    # This rewrites the URL by replacing whatever is under 'rules->http->paths->path' with the value in rewrite-target. (beacause wear and video might be an independent applications witch doesn't have it's own /wear and /watch paths)
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /wear
+        backend:
+          serviceName: wear-service
+          servicePort: 8080
+      - path: /watch
+        backend:
+          serviceName: video-service
+          servicePort: 8080
+```
+
+*If a user tries to access a URL that does not match any of these rules, then the user is directed to the service specified as the **default-http-backend**.*
+
+**Splitting trafic by hostnames**
+
+```yaml
+  ...
+  rules:
+  - host: wear.my-online-store.com
+    http:
+      paths:
+      - backend:
+          serviceName: wear-service
+          servicePort: 8080
+  - host: video.my-online-store.com
+    http:
+      paths:
+      - backend:
+          serviceName: video-service
+          servicePort: 8080
+```
+
+8. Done!
+
+```bash
+kubectl get all --namespace=ingress-space
+kubectl edit ingress --namespace=app-space ingress-wear-watch
+cat <<EOF | kubectl create -f -
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-pay
+  namespace: critical-space
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /pay
+        backend:
+          serviceName: pay-service
+          servicePort: 8282
+EOF
+```
+
