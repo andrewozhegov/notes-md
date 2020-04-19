@@ -2485,3 +2485,96 @@ spec:
 EOF
 ```
 
+---
+
+### Kubernetes the Hard Way
+
+#### Cluster designing
+
+1.  Purpose
+
+**education** - minikube or single node kubeadm/gcp/aws
+**development** - single master and multiple workers, kubeadm/gcp/aws/aks
+**production** - High Availability cluster with miltiple masters and workers, kubeadm/gcp/aws/aks
+
+![image-20200405131756729](../.img/image-20200405131756729.png)
+
+2.  Provider
+
+**cloud-provider** - gcp/aws/aks etc.
+**self-hosted cluster** - kubeadm
+
+3.  Workloads
+
+**storage:**
+High Performance – SSD Backed Storage
+Multiple Concurrent connections – Network based storage
+Persistent shared volumes for shared access across multiple PODs
+Label nodes with specific disk types
+Use Node Selectors to assign applications to nodes with specific disk types
+
+**resources requirements:**
+![image-20200405131756729](../.img/image-20200405131756729.png)
+
+**etcd:**
+High Availability suggests to host etcd instances separated from master nodes on it's own nodes
+
+#### Choosing infrastructure
+
+Fore this example I'll choose self-hosted cluster with virtual machines as a nodes.
+
+#### Network solution
+
+https://kubernetes.io/docs/concepts/cluster-administration/networking/#how-to-implement-the-kubernetes-networking-model
+WeaveNet CNI
+
+#### High Availability
+
+*multiple master nodes*
+
+Master hosts a control-plane conponents: apiserver, controller-manager, etcd, scheduler.
+
+##### kube-apiserver
+
+can be alive a few instances at the same time (requires load-balances in front of the cluster)
+![image-20200405142601725](../.img/image-20200405142601725.png)
+
+##### controller-manager & scheduler
+
+can't work at parallel with instances on other masters due to risk of duplicate actions
+So only one instance might be Active at a time.
+Set option `--leader-elect=false` for all instances except one (set as true by default). It makes this instance Active.
+Set option `--leader-elect-lease-duration=15s` to specify a time amount to hold in a passive state.
+Option `--leader-elect-renew-deadline=10s` active process then renews the lease every 10 sec.
+Both the processes tries to become the leader every two seconds, set by the `--leader-elect-retry-period` option.
+
+##### etcd
+
+*can be **part of a master** or **hosted in separate node***
+
+#### ETCD in a High Availability
+
+Distributed etcd storage provides an ability to read and write data from any of it's instances.
+Etcd ensures that every instance contains the same data.
+
+##### Leader election with RAFT Protocol
+
+**Example:**
+
+*   3 nodes
+*   random timer on each node
+*   node with shortest timer became a leader
+*   non-leader will respond with accepting a new leader
+*   done
+*   from now leader must send a regular notification to followers to prove that is alive
+*   if followers do not recieve a notification from leader, they run random timer again
+
+##### ETCD Write-requests
+
+**Only one leader instance responsible for processing write-requests at a time!**
+*write-request always goes from follower etcd-instances to current leader instance, however **read**-requests always process by instance itself*
+
+**The write is considered to be complete only of it can be written on a Majority number of nodes.**
+
+**Majority** (Quorum) = NODES / 2 + 1 (**rounded to a smaller**)
+*a minimum number of nodes must be available to complete write request*
